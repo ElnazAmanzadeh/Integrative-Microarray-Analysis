@@ -1,0 +1,135 @@
+library(knitr)
+library(xtable) # table
+library(mixOmics)
+
+library(sva) # ComBat
+library(ggplot2) # PCA sample plot with density
+library(gridExtra) # PCA sample plot with density
+library(limma) # removeBatchEffect (LIMMA)
+library(vegan) # RDA
+library(AgiMicroRna) # RLE plot
+library(cluster) # silhouette coefficient
+library(variancePartition) # variance calculation
+library(pvca) # PVCA
+library(pheatmap) # heatmap
+library(ruv) # RUVIII
+library(lmerTest) # lmer
+library(bapred) # FAbatch
+
+
+BiocManager::install("oligoClasses")
+
+setwd("E:/2023-06-31-Parastoo-Project/pca-example")
+load(file = 'microbiome_datasets.RData')
+
+
+# sponge data
+sponge.tss <- sponge.tss + 0.01
+sponge.tss.clr <- logratio.transfo(sponge.tss, logratio = 'CLR')
+class(sponge.tss.clr) <- 'matrix' 
+
+# sponge data
+sponge.pca.before <- pca(sponge.tss.clr, ncomp = 3)
+# sponge data
+Scatter_Density(data = sponge.pca.before$variates$X, batch = sponge.batch, 
+                trt = sponge.trt, expl.var = sponge.pca.before$explained_variance, 
+                xlim = c(-4.5,5), ylim = c(-3,4), 
+                batch.legend.title = 'Gel (batch)', 
+                trt.legend.title = 'Tissue (trt)', 
+                title = 'Before batch effect correction (Sponge)')
+
+
+sponge.before.df <- data.frame(value = sponge.tss.clr[,9], batch = sponge.batch)
+
+box_plot_fun(data = sponge.before.df, x = sponge.before.df$batch,
+             y = sponge.before.df$value, title = 'OTU9 (Sponge)',
+             batch.legend.title = 'Gel (batch)')
+
+
+ggplot(sponge.before.df, aes(x = value, fill = batch)) + 
+  geom_density(alpha = 0.5) + scale_fill_manual(values = color.mixo(1:10)) + 
+  labs(title = 'OTU9 (Sponge)', x = 'Value', fill = 'Gel (batch)') + 
+  theme_bw() + theme(plot.title = element_text(hjust = 0.5), 
+                     panel.grid = element_blank())
+
+
+#Assuming the data fit the distribution of the linear model
+#(which is the case here after CLR transformation), 
+#we can also assess the effect of batch in a linear model on that particular OTU9:
+  
+  sponge.lm <- lm(sponge.tss.clr[,9] ~ sponge.trt + sponge.batch)
+summary(sponge.lm)
+
+sponge.batch_c <- sponge.batch[sponge.trt == 'C']
+sponge.batch_e <- sponge.batch[sponge.trt == 'E'] 
+
+sponge.before_c <- sponge.tss.clr[sponge.trt == 'C', ]
+sponge.before_e <- sponge.tss.clr[sponge.trt == 'E', ] 
+
+
+RleMicroRna2(object = t(sponge.before_c), batch = sponge.batch_c, 
+             maintitle = 'Sponge (tissue: choanosome)')
+
+
+
+
+
+# Sponge data heatmap
+# scale on OTUs
+sponge.tss.clr.scale <- scale(sponge.tss.clr, center = T, scale = T) 
+# scale on samples
+sponge.tss.clr.scale <- scale(t(sponge.tss.clr.scale), center = T, scale = T) 
+
+sponge.anno_col <- data.frame(Batch = sponge.batch, Tissue = sponge.trt)
+sponge.anno_metabo_colors <- list(Batch = c('1' = '#388ECC', '2' = '#F68B33'), 
+                                  Tissue = c(C = '#F0E442', E = '#D55E00'))
+
+
+pheatmap(sponge.tss.clr.scale, 
+         scale = 'none', 
+         cluster_rows = F, 
+         cluster_cols = T, 
+         fontsize_row = 5, fontsize_col = 8,
+         fontsize = 8,
+         clustering_distance_rows = 'euclidean',
+         clustering_method = 'ward.D',
+         treeheight_row = 30,
+         annotation_col = sponge.anno_col,
+         annotation_colors = sponge.anno_metabo_colors,
+         border_color = 'NA',
+         main = 'Sponge data - Scaled')
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+## Batch effect adjustment
+
+
+# Sponge data
+sponge.trt_p <- apply(sponge.tss.clr, 2, FUN = function(x){
+  res.lm <- lm(x ~ sponge.trt + sponge.batch)
+  summary.res <- summary(res.lm)
+  p <- summary.res$coefficients[2,4]
+})
+
+sponge.trt_adjp <- p.adjust(sponge.trt_p, method = 'fdr')
+
+
+
+# sponge data
+sponge.mod <- model.matrix( ~ sponge.trt) # full model
+sponge.mod0 <- model.matrix( ~ 1,data = sponge.trt) # null model
+sponge.sva.n <- num.sv(dat = t(sponge.tss.clr), mod = sponge.mod)
+
+#Next we apply the sva function to estimate the surrogate variables with
+#both full and null models:
+  
+  sponge.sva <- sva(dat = t(sponge.tss.clr), mod = sponge.mod, 
+                    mod0 = sponge.mod0, n.sv = sponge.sva.n)
+
+#The f.pvalue function is then used to calculate parametric F-test P-values and Q-values
+#  (adjusted P-values) for each OTU of sponge data.
+  
+  sponge.mod.bat <- cbind(sponge.mod, sponge.sva$sv)
+  sponge.mod0.bat <- cbind(sponge.mod0, sponge.sva$sv)
+  
+  sponge.sva.trt_p <- f.pvalue(t(sponge.tss.clr), sponge.mod.bat, sponge.mod0.bat)
+  sponge.sva.trt_adjp <- p.adjust(sponge.sva.trt_p, method='fdr')
